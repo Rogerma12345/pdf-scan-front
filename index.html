@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>PDF 扫描风生成器（纯前端）</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 16px;
+      line-height: 1.5;
+    }
+    h1 {
+      font-size: 1.4rem;
+      margin-bottom: 0.5rem;
+    }
+    .panel {
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin-bottom: 16px;
+    }
+    label {
+      display: block;
+      margin: 8px 0 4px;
+    }
+    input[type="file"],
+    input[type="text"],
+    input[type="number"] {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 6px 8px;
+      margin-bottom: 8px;
+    }
+    button {
+      padding: 8px 16px;
+      border-radius: 4px;
+      border: 1px solid #333;
+      background: #222;
+      color: #fff;
+      cursor: pointer;
+      font-size: 0.95rem;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+    #log {
+      font-size: 0.9rem;
+      white-space: pre-line;
+      margin-top: 8px;
+    }
+    progress {
+      width: 100%;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1>PDF 扫描风生成器（纯前端）</h1>
+  <div class="panel">
+    <label for="pdfFile">选择 PDF 文件（仅本地，不上传）：</label>
+    <input id="pdfFile" type="file" accept="application/pdf" />
+
+    <label for="watermark">水印文字（可选，留空则不加水印）：</label>
+    <input id="watermark" type="text" placeholder="例如：Confidential / 公司名称" />
+
+    <label for="dpi">渲染缩放（数值越大越清晰，内存也更高，建议 1.5~2.5）：</label>
+    <input id="scale" type="number" value="2" step="0.25" min="1" max="3" />
+
+    <button id="startBtn">生成扫描风 PDF</button>
+    <progress id="progress" value="0" max="1" style="display: none;"></progress>
+    <div id="log"></div>
+  </div>
+
+  <!-- 引入 UMD 版本的 jsPDF -->
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  
+  <!-- 主逻辑脚本 -->
+  <script type="module">
+    // pdf.js ES Module（渲染原始 PDF）
+    // 版本可按需调整
+    import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.269/build/pdf.min.mjs";
+    // 设置 worker
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.269/build/pdf.worker.min.mjs";
+
+    // jsPDF 现在是全局的，从 window.jspdf 中获取
+    const { jsPDF } = window.jspdf;
+
+    const fileInput = document.getElementById("pdfFile");
+    const watermarkInput = document.getElementById("watermark");
+    const scaleInput = document.getElementById("scale");
+    const startBtn = document.getElementById("startBtn");
+    const progressEl = document.getElementById("progress");
+    const logEl = document.getElementById("log");
+
+    function log(msg) {
+      logEl.textContent = msg;
+    }
+
+    function addWatermark(ctx, width, height, text) {
+      if (!text) return;
+
+      ctx.save();
+      ctx.globalAlpha = 0.15;
+      ctx.translate(width / 2, height / 2);
+      ctx.rotate(-Math.PI / 4);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+
+      const fontSize = Math.min(width, height) / 8;
+      ctx.font = fontSize + "px sans-serif";
+      ctx.fillStyle = "#000";
+      ctx.fillText(text, 0, 0);
+      ctx.restore();
+    }
+
+    function applyScanEffect(baseCanvas, options = {}) {
+      const { margin = 30, maxAngleDeg = 2 } = options;
+
+      const srcW = baseCanvas.width;
+      const srcH = baseCanvas.height;
+
+      const outW = srcW + margin * 2;
+      const outH = srcH + margin * 2;
+
+      const outCanvas = document.createElement("canvas");
+      outCanvas.width = outW;
+      outCanvas.height = outH;
+      const ctx = outCanvas.getContext("2d");
+
+      // 灰白背景
+      ctx.fillStyle = "#f6f6f6";
+      ctx.fillRect(0, 0, outW, outH);
+
+      // 轻微旋转
+      const angleRad = ((Math.random() - 0.5) * maxAngleDeg * Math.PI) / 180;
+
+      ctx.save();
+      ctx.translate(outW / 2, outH / 2);
+      ctx.rotate(angleRad);
+      ctx.drawImage(baseCanvas, -srcW / 2, -srcH / 2);
+      ctx.restore();
+
+      // 可以按需再加噪点、模糊，这里保持简单
+
+      return outCanvas;
+    }
+
+    startBtn.addEventListener("click", async () => {
+      try {
+        if (!fileInput.files || fileInput.files.length === 0) {
+          alert("请先选择一个 PDF 文件。");
+          return;
+        }
+
+        const file = fileInput.files[0];
+        if (file.type !== "application/pdf") {
+          alert("只支持 PDF 文件。");
+          return;
+        }
+
+        let scale = parseFloat(scaleInput.value);
+        if (!Number.isFinite(scale) || scale <= 0) {
+          scale = 2;
+        }
+
+        const watermarkText = watermarkInput.value.trim();
+
+        startBtn.disabled = true;
+        log("读取 PDF 文件...");
+        progressEl.style.display = "block";
+        progressEl.value = 0;
+
+        const arrayBuffer = await file.arrayBuffer();
+        
+        log("正在解析 PDF...");
+        const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+        const pdfDoc = await loadingTask.promise;
+        const numPages = pdfDoc.numPages;
+
+        progressEl.max = numPages;
+        
+        let finalPdf = null;
+
+        for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+          log(`正在处理第 ${pageNum} / ${numPages} 页...`);
+          const page = await pdfDoc.getPage(pageNum);
+          const viewport = page.getViewport({ scale: scale });
+
+          // 渲染到基础画布
+          const baseCanvas = document.createElement("canvas");
+          const baseCtx = baseCanvas.getContext("2d");
+          baseCanvas.width = viewport.width;
+          baseCanvas.height = viewport.height;
+
+          await page.render({
+            canvasContext: baseCtx,
+            viewport: viewport,
+          }).promise;
+
+          // 做扫描效果
+          const scannedCanvas = applyScanEffect(baseCanvas);
+
+          // 加水印
+          if (watermarkText) {
+            const ctx = scannedCanvas.getContext("2d");
+            addWatermark(ctx, scannedCanvas.width, scannedCanvas.height, watermarkText);
+          }
+
+          const imgData = scannedCanvas.toDataURL("image/jpeg", 0.9);
+          const { width, height } = scannedCanvas;
+          const orientation = width > height ? "l" : "p";
+
+          if (!finalPdf) {
+            // 初始化 PDF
+            finalPdf = new jsPDF({
+              unit: "pt",
+              format: [width, height],
+            });
+          } else {
+            // 添加新页面
+            finalPdf.addPage([width, height], orientation);
+          }
+          
+          // 将当前页的图像添加到 PDF
+          finalPdf.addImage(imgData, "JPEG", 0, 0, width, height);
+          
+          progressEl.value = pageNum;
+        }
+
+        if (!finalPdf) {
+          throw new Error("未能生成任何 PDF 页面。");
+        }
+
+        log("正在合成最终的 PDF...");
+        const outName =
+          (file.name || "document").replace(/\.pdf$/i, "") + "_scanned.pdf";
+        finalPdf.save(outName);
+        log("完成，已触发下载：" + outName);
+
+      } catch (e) {
+        console.error(e);
+        log("出错：" + e.message);
+        alert("出错：" + e.message);
+      } finally {
+        startBtn.disabled = false;
+        progressEl.style.display = "none";
+      }
+    });
+  </script>
+</body>
+</html>
