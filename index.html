@@ -28,7 +28,8 @@
     }
     input[type="file"],
     input[type="text"],
-    input[type="number"] {
+    input[type="number"],
+    select {
       width: 100%;
       box-sizing: border-box;
       padding: 6px 8px;
@@ -69,188 +70,224 @@
 
     <label for="dpi">渲染缩放（数值越大越清晰，内存也更高，建议 1.5~2.5）：</label>
     <input id="scale" type="number" value="2" step="0.25" min="1" max="3" />
+    
+    <label for="cdnSelector">CDN 源 (若加载缓慢或失败可切换):</label>
+    <select id="cdnSelector">
+      <option value="jsdelivr">jsDelivr (默认)</option>
+      <option value="unpkg">Unpkg (备用)</option>
+    </select>
 
     <button id="startBtn">生成扫描风 PDF</button>
     <progress id="progress" value="0" max="1" style="display: none;"></progress>
     <div id="log"></div>
   </div>
 
-  <!-- 引入 UMD 版本的 jsPDF -->
-  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
-  
-  <!-- 主逻辑脚本 -->
-  <script type="module">
-    // pdf.js ES Module（渲染原始 PDF）
-    // 版本可按需调整
-    import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.269/build/pdf.min.mjs";
-    // 设置 worker
-    pdfjsLib.GlobalWorkerOptions.workerSrc =
-      "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.269/build/pdf.worker.min.mjs";
-
-    // jsPDF 现在是全局的，从 window.jspdf 中获取
-    const { jsPDF } = window.jspdf;
-
-    const fileInput = document.getElementById("pdfFile");
-    const watermarkInput = document.getElementById("watermark");
-    const scaleInput = document.getElementById("scale");
-    const startBtn = document.getElementById("startBtn");
-    const progressEl = document.getElementById("progress");
-    const logEl = document.getElementById("log");
-
-    function log(msg) {
-      logEl.textContent = msg;
-    }
-
-    function addWatermark(ctx, width, height, text) {
-      if (!text) return;
-
-      ctx.save();
-      ctx.globalAlpha = 0.15;
-      ctx.translate(width / 2, height / 2);
-      ctx.rotate(-Math.PI / 4);
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-
-      const fontSize = Math.min(width, height) / 8;
-      ctx.font = fontSize + "px sans-serif";
-      ctx.fillStyle = "#000";
-      ctx.fillText(text, 0, 0);
-      ctx.restore();
-    }
-
-    function applyScanEffect(baseCanvas, options = {}) {
-      const { margin = 30, maxAngleDeg = 2 } = options;
-
-      const srcW = baseCanvas.width;
-      const srcH = baseCanvas.height;
-
-      const outW = srcW + margin * 2;
-      const outH = srcH + margin * 2;
-
-      const outCanvas = document.createElement("canvas");
-      outCanvas.width = outW;
-      outCanvas.height = outH;
-      const ctx = outCanvas.getContext("2d");
-
-      // 灰白背景
-      ctx.fillStyle = "#f6f6f6";
-      ctx.fillRect(0, 0, outW, outH);
-
-      // 轻微旋转
-      const angleRad = ((Math.random() - 0.5) * maxAngleDeg * Math.PI) / 180;
-
-      ctx.save();
-      ctx.translate(outW / 2, outH / 2);
-      ctx.rotate(angleRad);
-      ctx.drawImage(baseCanvas, -srcW / 2, -srcH / 2);
-      ctx.restore();
-
-      // 可以按需再加噪点、模糊，这里保持简单
-
-      return outCanvas;
-    }
-
-    startBtn.addEventListener("click", async () => {
-      try {
-        if (!fileInput.files || fileInput.files.length === 0) {
-          alert("请先选择一个 PDF 文件。");
-          return;
+  <script>
+    // --- 动态库加载器 ---
+    (function() {
+      // 1. 定义 CDN 配置
+      const cdnConfigs = {
+        jsdelivr: {
+          jspdf: 'https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js',
+          pdfjs: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.269/build/pdf.min.mjs',
+          pdfjsWorker: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.269/build/pdf.worker.min.mjs'
+        },
+        unpkg: {
+          jspdf: 'https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js',
+          pdfjs: 'https://unpkg.com/pdfjs-dist@4.0.269/build/pdf.min.mjs',
+          pdfjsWorker: 'https://unpkg.com/pdfjs-dist@4.0.269/build/pdf.worker.min.mjs'
         }
+      };
 
-        const file = fileInput.files[0];
-        if (file.type !== "application/pdf") {
-          alert("只支持 PDF 文件。");
-          return;
-        }
+      // 2. 从 localStorage 获取用户选择，并设置 UI
+      const selector = document.getElementById('cdnSelector');
+      const storedCdn = localStorage.getItem('pdfScanCdn') || 'jsdelivr';
+      selector.value = storedCdn;
 
-        let scale = parseFloat(scaleInput.value);
-        if (!Number.isFinite(scale) || scale <= 0) {
-          scale = 2;
-        }
+      // 3. 监听 CDN 切换事件
+      selector.addEventListener('change', () => {
+        localStorage.setItem('pdfScanCdn', selector.value);
+        alert('CDN 源已切换，页面将重新加载。');
+        location.reload();
+      });
 
-        const watermarkText = watermarkInput.value.trim();
+      // 4. 准备加载配置
+      const config = cdnConfigs[storedCdn];
+      window.pdfJsConfig = { // 将配置暴露给全局，供模块脚本使用
+          url: config.pdfjs,
+          workerUrl: config.pdfjsWorker
+      };
 
-        startBtn.disabled = true;
-        log("读取 PDF 文件...");
-        progressEl.style.display = "block";
-        progressEl.value = 0;
+      // 5. 加载 jsPDF (UMD)，加载成功后，再加载主逻辑模块
+      const jspdfScript = document.createElement('script');
+      jspdfScript.src = config.jspdf;
+      jspdfScript.onload = () => {
+        const mainModule = document.createElement('script');
+        mainModule.type = 'module';
+        mainModule.innerHTML = `
+          // --- 主应用逻辑 ---
 
-        const arrayBuffer = await file.arrayBuffer();
-        
-        log("正在解析 PDF...");
-        const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-        const pdfDoc = await loadingTask.promise;
-        const numPages = pdfDoc.numPages;
+          let pdfjsLib = null;
+          window.libsLoaded = false; // 全局标志，用于检查库是否加载成功
 
-        progressEl.max = numPages;
-        
-        let finalPdf = null;
+          // 应用程序初始化
+          async function initializeApp() {
+            try {
+              // 动态导入 pdf.js 模块
+              const pdfjsModule = await import(window.pdfJsConfig.url);
+              pdfjsLib = pdfjsModule;
+              pdfjsLib.GlobalWorkerOptions.workerSrc = window.pdfJsConfig.workerUrl;
 
-        for (let pageNum = 1; pageNum <= numPages; pageNum++) {
-          log(`正在处理第 ${pageNum} / ${numPages} 页...`);
-          const page = await pdfDoc.getPage(pageNum);
-          const viewport = page.getViewport({ scale: scale });
+              // 确认 jsPDF 也已加载
+              if (typeof window.jspdf === 'undefined') {
+                throw new Error('jsPDF library failed to load.');
+              }
+              
+              window.libsLoaded = true;
+              console.log('核心库加载成功!');
 
-          // 渲染到基础画布
-          const baseCanvas = document.createElement("canvas");
-          const baseCtx = baseCanvas.getContext("2d");
-          baseCanvas.width = viewport.width;
-          baseCanvas.height = viewport.height;
-
-          await page.render({
-            canvasContext: baseCtx,
-            viewport: viewport,
-          }).promise;
-
-          // 做扫描效果
-          const scannedCanvas = applyScanEffect(baseCanvas);
-
-          // 加水印
-          if (watermarkText) {
-            const ctx = scannedCanvas.getContext("2d");
-            addWatermark(ctx, scannedCanvas.width, scannedCanvas.height, watermarkText);
+            } catch (error) {
+              console.error('核心库加载失败:', error);
+              // 失败时，按钮点击事件会处理提示
+            }
           }
 
-          const imgData = scannedCanvas.toDataURL("image/jpeg", 0.9);
-          const { width, height } = scannedCanvas;
-          const orientation = width > height ? "l" : "p";
+          // DOM 元素获取
+          const fileInput = document.getElementById("pdfFile");
+          const watermarkInput = document.getElementById("watermark");
+          const scaleInput = document.getElementById("scale");
+          const startBtn = document.getElementById("startBtn");
+          const progressEl = document.getElementById("progress");
+          const logEl = document.getElementById("log");
 
-          if (!finalPdf) {
-            // 初始化 PDF
-            finalPdf = new jsPDF({
-              unit: "pt",
-              format: [width, height],
-            });
-          } else {
-            // 添加新页面
-            finalPdf.addPage([width, height], orientation);
+          function log(msg) {
+            logEl.textContent = msg;
           }
-          
-          // 将当前页的图像添加到 PDF
-          finalPdf.addImage(imgData, "JPEG", 0, 0, width, height);
-          
-          progressEl.value = pageNum;
-        }
 
-        if (!finalPdf) {
-          throw new Error("未能生成任何 PDF 页面。");
-        }
+          function addWatermark(ctx, width, height, text) {
+            if (!text) return;
+            ctx.save();
+            ctx.globalAlpha = 0.15;
+            ctx.translate(width / 2, height / 2);
+            ctx.rotate(-Math.PI / 4);
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            const fontSize = Math.min(width, height) / 8;
+            ctx.font = fontSize + "px sans-serif";
+            ctx.fillStyle = "#000";
+            ctx.fillText(text, 0, 0);
+            ctx.restore();
+          }
 
-        log("正在合成最终的 PDF...");
-        const outName =
-          (file.name || "document").replace(/\.pdf$/i, "") + "_scanned.pdf";
-        finalPdf.save(outName);
-        log("完成，已触发下载：" + outName);
+          function applyScanEffect(baseCanvas, options = {}) {
+            const { margin = 30, maxAngleDeg = 2 } = options;
+            const srcW = baseCanvas.width;
+            const srcH = baseCanvas.height;
+            const outW = srcW + margin * 2;
+            const outH = srcH + margin * 2;
+            const outCanvas = document.createElement("canvas");
+            outCanvas.width = outW;
+            outCanvas.height = outH;
+            const ctx = outCanvas.getContext("2d");
+            ctx.fillStyle = "#f6f6f6";
+            ctx.fillRect(0, 0, outW, outH);
+            const angleRad = ((Math.random() - 0.5) * maxAngleDeg * Math.PI) / 180;
+            ctx.save();
+            ctx.translate(outW / 2, outH / 2);
+            ctx.rotate(angleRad);
+            ctx.drawImage(baseCanvas, -srcW / 2, -srcH / 2);
+            ctx.restore();
+            return outCanvas;
+          }
 
-      } catch (e) {
-        console.error(e);
-        log("出错：" + e.message);
-        alert("出错：" + e.message);
-      } finally {
-        startBtn.disabled = false;
-        progressEl.style.display = "none";
-      }
-    });
+          // 主按钮点击事件
+          startBtn.addEventListener("click", async () => {
+            // **新增**：检查库是否加载成功
+            if (!window.libsLoaded) {
+              alert('核心库加载失败，请尝试切换 CDN 源并刷新页面。');
+              return;
+            }
+
+            try {
+              if (!fileInput.files || fileInput.files.length === 0) {
+                alert("请先选择一个 PDF 文件。");
+                return;
+              }
+              const file = fileInput.files[0];
+              if (file.type !== "application/pdf") {
+                alert("只支持 PDF 文件。");
+                return;
+              }
+              let scale = parseFloat(scaleInput.value);
+              if (!Number.isFinite(scale) || scale <= 0) scale = 2;
+              const watermarkText = watermarkInput.value.trim();
+
+              startBtn.disabled = true;
+              log("读取 PDF 文件...");
+              progressEl.style.display = "block";
+              progressEl.value = 0;
+
+              const arrayBuffer = await file.arrayBuffer();
+              log("正在解析 PDF...");
+              const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+              const pdfDoc = await loadingTask.promise;
+              const numPages = pdfDoc.numPages;
+              progressEl.max = numPages;
+              
+              let finalPdf = null;
+              const { jsPDF } = window.jspdf;
+
+              for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+                log(\`正在处理第 \${pageNum} / \${numPages} 页...\`);
+                const page = await pdfDoc.getPage(pageNum);
+                const viewport = page.getViewport({ scale: scale });
+                const baseCanvas = document.createElement("canvas");
+                baseCanvas.width = viewport.width;
+                baseCanvas.height = viewport.height;
+                await page.render({ canvasContext: baseCanvas.getContext("2d"), viewport: viewport }).promise;
+                const scannedCanvas = applyScanEffect(baseCanvas);
+                if (watermarkText) {
+                  addWatermark(scannedCanvas.getContext("2d"), scannedCanvas.width, scannedCanvas.height, watermarkText);
+                }
+                const imgData = scannedCanvas.toDataURL("image/jpeg", 0.9);
+                const { width, height } = scannedCanvas;
+                const orientation = width > height ? "l" : "p";
+                if (!finalPdf) {
+                  finalPdf = new jsPDF({ unit: "pt", format: [width, height] });
+                } else {
+                  finalPdf.addPage([width, height], orientation);
+                }
+                finalPdf.addImage(imgData, "JPEG", 0, 0, width, height);
+                progressEl.value = pageNum;
+              }
+
+              if (!finalPdf) throw new Error("未能生成任何 PDF 页面。");
+
+              log("正在合成最终的 PDF...");
+              const outName = (file.name || "document").replace(/\\.pdf$/i, "") + "_scanned.pdf";
+              finalPdf.save(outName);
+              log("完成，已触发下载：" + outName);
+
+            } catch (e) {
+              console.error(e);
+              log("出错：" + e.message);
+              alert("出错：" + e.message);
+            } finally {
+              startBtn.disabled = false;
+              progressEl.style.display = "none";
+            }
+          });
+
+          // 启动应用
+          initializeApp();
+        `;
+        document.body.appendChild(mainModule);
+      };
+      jspdfScript.onerror = () => {
+          console.error('jsPDF 库加载失败，请检查网络或切换 CDN。');
+      };
+      document.body.appendChild(jspdfScript);
+    })();
   </script>
 </body>
 </html>
